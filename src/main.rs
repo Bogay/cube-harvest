@@ -1,6 +1,7 @@
 use core::panic;
 use k8s_openapi::api::core::v1::Node;
 use k8s_openapi::api::core::v1::Pod;
+use kube::ResourceExt;
 use kube::{Api, Client, Config, api::ListParams};
 use macroquad::experimental::collections::storage;
 use macroquad::prelude::{
@@ -33,7 +34,7 @@ void main() {
 }
 ";
 
-enum GameState {
+enum GameStage {
     MainMenu,
     Playing,
     Paused,
@@ -71,6 +72,11 @@ impl GameResources {
             nodes: nodes.items,
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct GameState {
+    selected_node_index: usize,
 }
 
 impl Shape {
@@ -117,6 +123,7 @@ async fn main() {
         .await
         .expect("failed to send game msg");
 
+    // TODO: handle exiting game
     let reconciliation_loop = tokio::spawn(async move {
         loop {
             let game_resources = GameResources::new(&client).await;
@@ -132,8 +139,8 @@ async fn main() {
     // ref: https://github.com/not-fl3/macroquad/issues/182#issuecomment-1001571263
     let game_window_handle = open_game_window(rx);
 
-    reconciliation_loop.await.unwrap();
     game_window_handle.await.unwrap();
+    reconciliation_loop.await.unwrap();
 }
 
 enum GameMessage {
@@ -158,8 +165,12 @@ async fn draw(mut rx: Receiver<GameMessage>) {
     rand::srand(miniquad::date::now() as u64);
     set_pc_assets_folder("assets");
 
+    storage::store(GameState {
+        selected_node_index: 0,
+    });
+
     let mut explosions: Vec<(Emitter, Vec2)> = vec![];
-    let mut game_state = GameState::MainMenu;
+    let mut game_stage = GameStage::MainMenu;
     let mut score: u32 = 0;
     let mut squares: Vec<Shape> = vec![];
     let mut bullets: Vec<Shape> = vec![];
@@ -297,8 +308,8 @@ async fn draw(mut rx: Receiver<GameMessage>) {
         );
         gl_use_default_material();
 
-        match game_state {
-            GameState::MainMenu => {
+        match game_stage {
+            GameStage::MainMenu => {
                 // update
                 if is_key_pressed(KeyCode::Escape) {
                     std::process::exit(0);
@@ -311,7 +322,7 @@ async fn draw(mut rx: Receiver<GameMessage>) {
                     circle.x = screen_width() / 2.;
                     circle.y = screen_height() / 2.;
                     score = 0;
-                    game_state = GameState::Playing;
+                    game_stage = GameStage::Playing;
                 }
 
                 // draw
@@ -325,26 +336,21 @@ async fn draw(mut rx: Receiver<GameMessage>) {
                     WHITE,
                 );
             }
-            GameState::Playing => {
+            GameStage::Playing => {
                 // update
                 let delta_time = get_frame_time();
-                let game_resources = storage::get::<GameResources>();
-                score = game_resources.pods.len() as u32;
-                // if rand::gen_range(0, 99) >= 95 {
-                //     let size = rand::gen_range(16., 64.);
-                //     squares.push(Shape {
-                //         size,
-                //         speed: rand::gen_range(50., 150.),
-                //         x: rand::gen_range(size / 2., screen_width() - size / 2.),
-                //         y: -size,
-                //         collided: false,
-                //     });
-                // }
-                // for sq in &mut squares {
-                //     sq.y += sq.speed * delta_time;
-                // }
+                let mut game_state = storage::get_mut::<GameState>().clone();
+                score = {
+                    let game_resources = storage::get::<GameResources>();
+                    game_resources.pods.len() as u32
+                };
+                let nodes_len = {
+                    let game_resources = storage::get::<GameResources>();
+                    game_resources.nodes.len()
+                };
+
                 if is_key_down(KeyCode::Escape) {
-                    game_state = GameState::Paused;
+                    game_stage = GameStage::Paused;
                 }
 
                 // if is_key_down(KeyCode::Space) {
@@ -360,16 +366,20 @@ async fn draw(mut rx: Receiver<GameMessage>) {
                 //     bullet.y -= bullet.speed * delta_time;
                 // }
 
-                // if is_key_down(KeyCode::Right) {
-                //     circle.x += MOVEMENT_SPEED * delta_time;
-                //     direction_modifier += 0.05 * delta_time;
-                //     ship_sprite.set_animation(2);
-                // }
-                // if is_key_down(KeyCode::Left) {
-                //     circle.x -= MOVEMENT_SPEED * delta_time;
-                //     direction_modifier -= 0.05 * delta_time;
-                //     ship_sprite.set_animation(1);
-                // }
+                if is_key_down(KeyCode::Right) {
+                    // circle.x += MOVEMENT_SPEED * delta_time;
+                    // direction_modifier += 0.05 * delta_time;
+                    // ship_sprite.set_animation(2);
+                    game_state.selected_node_index =
+                        game_state.selected_node_index.saturating_add(1);
+                }
+                if is_key_down(KeyCode::Left) {
+                    // circle.x -= MOVEMENT_SPEED * delta_time;
+                    // direction_modifier -= 0.05 * delta_time;
+                    // ship_sprite.set_animation(1);
+                    game_state.selected_node_index =
+                        game_state.selected_node_index.saturating_sub(1);
+                }
                 // if is_key_down(KeyCode::Down) {
                 //     circle.y += MOVEMENT_SPEED * delta_time;
                 // }
@@ -407,6 +417,11 @@ async fn draw(mut rx: Receiver<GameMessage>) {
                 //     }
                 //     game_state = GameState::GameOver;
                 // }
+                game_state.selected_node_index =
+                    clamp(game_state.selected_node_index, 0, nodes_len - 1);
+
+                // post update
+                storage::store(game_state);
 
                 // draw enemy
                 // enemy_small_sprite.update();
@@ -457,7 +472,27 @@ async fn draw(mut rx: Receiver<GameMessage>) {
                 //         },
                 //     );
                 // }
-                draw_text(&format!("Score: {}", score), 10.0, 35.0, 25.0, WHITE);
+                let label_size = 25;
+                let label_scale = 1.0;
+                let label_padding = 4.0;
+                let label_dimensions = measure_text("Placeholder", None, label_size, label_scale);
+                draw_text(
+                    &format!("Astro Units: {}", score),
+                    10.0,
+                    35.0,
+                    label_size as f32,
+                    WHITE,
+                );
+                draw_text(
+                    &format!("Credits    : {}", score),
+                    10.0,
+                    35.0 + label_dimensions.height + label_padding,
+                    label_size as f32,
+                    WHITE,
+                );
+
+                // draw node
+                draw_node();
 
                 // post draw
                 // bullets.retain(|b| b.y > 0. - b.size / 2.);
@@ -465,9 +500,9 @@ async fn draw(mut rx: Receiver<GameMessage>) {
                 // bullets.retain(|b| !b.collided);
                 // explosions.retain(|(e, _)| e.config.emitting);
             }
-            GameState::Paused => {
+            GameStage::Paused => {
                 if is_key_pressed(KeyCode::Space) {
-                    game_state = GameState::Playing;
+                    game_stage = GameStage::Playing;
                 }
 
                 let text = "Paused";
@@ -480,9 +515,9 @@ async fn draw(mut rx: Receiver<GameMessage>) {
                     WHITE,
                 );
             }
-            GameState::GameOver => {
+            GameStage::GameOver => {
                 if is_key_pressed(KeyCode::Space) {
-                    game_state = GameState::MainMenu;
+                    game_stage = GameStage::MainMenu;
                 }
 
                 let text = "GAME OVER!";
@@ -499,4 +534,60 @@ async fn draw(mut rx: Receiver<GameMessage>) {
 
         next_frame().await
     }
+}
+
+fn draw_node() {
+    let width = screen_width();
+    let height = screen_height();
+    let node_index = storage::get::<GameState>().selected_node_index;
+    let game_resources = storage::get::<GameResources>();
+    let node = &game_resources.nodes[node_index];
+    let node_name = node.metadata.name.as_ref().expect("nodes should have name");
+    let pods = game_resources
+        .pods
+        .iter()
+        .filter(|p| {
+            p.spec
+                .as_ref()
+                .and_then(|s| s.node_name.as_ref())
+                .map(|nn| nn == node_name)
+                .unwrap_or(false)
+        })
+        .collect::<Vec<_>>();
+
+    // draw node plane
+    let node_width = width * 0.7;
+    let node_height = 100.;
+    draw_rectangle(
+        width / 2. - node_width / 2.,
+        height - node_height / 2.,
+        node_width,
+        node_height,
+        WHITE,
+    );
+
+    // draw pods info
+    let pod_size = 32.;
+    for (i, p) in pods.iter().enumerate() {
+        draw_astro_unit(
+            width / 2. - 200. + pod_size * 1.5 * i as f32,
+            height - node_height / 2. + 15. - pod_size / 2.,
+            pod_size,
+            BLUE,
+        );
+    }
+    draw_text(&format!("{}", pods.len()), 0., height - 10., 18., WHITE);
+}
+
+fn draw_astro_unit(x: f32, y: f32, size: f32, color: Color) {
+    // Main body (simple rectangle or custom polygon)
+    draw_rectangle(x - size / 2.0, y - size / 2.0, size, size, color);
+
+    // Optional: a small "engine" or "sensor" part
+    draw_triangle(
+        vec2(x - size / 4.0, y + size / 2.0),
+        vec2(x + size / 4.0, y + size / 2.0),
+        vec2(x, y + size / 2.0 + size / 4.0),
+        GRAY,
+    );
 }
