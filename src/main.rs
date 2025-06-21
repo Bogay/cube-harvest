@@ -1,11 +1,17 @@
+use core::panic;
+use k8s_openapi::api::core::v1::Node;
 use k8s_openapi::api::core::v1::Pod;
 use kube::{Api, Client, Config, api::ListParams};
+use macroquad::experimental::collections::storage;
 use macroquad::prelude::{
     animation::{AnimatedSprite, Animation},
     *,
 };
 use macroquad_particles::{self, AtlasConfig, ColorCurve, Emitter, EmitterConfig};
 use std::fs;
+use std::time::Duration;
+use tokio::sync::mpsc;
+use tokio::sync::mpsc::Receiver;
 use tokio::task::JoinHandle;
 
 const MOVEMENT_SPEED: f32 = 200.;
@@ -40,6 +46,31 @@ struct Shape {
     x: f32,
     y: f32,
     collided: bool,
+}
+
+struct GameResources {
+    pods: Vec<Pod>,
+    nodes: Vec<Node>,
+}
+
+impl GameResources {
+    // TODO: error handling
+    pub async fn new(client: &Client) -> Self {
+        let list_params = ListParams::default();
+        let pods = Api::default_namespaced(client.clone())
+            .list(&list_params)
+            .await
+            .expect("failed to get pods");
+        let nodes = Api::all(client.clone())
+            .list(&list_params)
+            .await
+            .expect("failed to get nodes");
+
+        Self {
+            pods: pods.items,
+            nodes: nodes.items,
+        }
+    }
 }
 
 impl Shape {
@@ -80,20 +111,36 @@ async fn main() {
     // setup kube client
     let config = Config::infer().await.expect("failed to load kubeconfig");
     let client = Client::try_from(config).expect("failed to create kube client");
-    let pods: Api<Pod> = Api::default_namespaced(client);
+    let game_resources = GameResources::new(&client).await;
+    let (tx, rx) = mpsc::channel(0x20);
+    tx.send(GameMessage::UpdateResources(game_resources))
+        .await
+        .expect("failed to send game msg");
 
-    let list_params = ListParams::default();
-    let pod = pods.list(&list_params).await.expect("failed to load pods");
-    println!("{pod:?}");
+    let reconciliation_loop = tokio::spawn(async move {
+        loop {
+            let game_resources = GameResources::new(&client).await;
+            tx.send(GameMessage::UpdateResources(game_resources))
+                .await
+                .expect("failed to send game msg");
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    });
 
-    let game_window_handle = open_game_window();
+    // Because macroquad need to be executed on one thread, we open it
+    // from tokio main function
+    // ref: https://github.com/not-fl3/macroquad/issues/182#issuecomment-1001571263
+    let game_window_handle = open_game_window(rx);
 
-    // TODO: some other game logic need to ran on tokio
-
+    reconciliation_loop.await.unwrap();
     game_window_handle.await.unwrap();
 }
 
-fn open_game_window() -> JoinHandle<()> {
+enum GameMessage {
+    UpdateResources(GameResources),
+}
+
+fn open_game_window(rx: Receiver<GameMessage>) -> JoinHandle<()> {
     tokio::task::spawn_blocking(|| {
         macroquad::Window::from_config(
             Conf {
@@ -102,21 +149,18 @@ fn open_game_window() -> JoinHandle<()> {
                 high_dpi: true,
                 ..Default::default()
             },
-            draw(),
+            draw(rx),
         );
     })
 }
 
-async fn draw() {
+async fn draw(mut rx: Receiver<GameMessage>) {
     rand::srand(miniquad::date::now() as u64);
     set_pc_assets_folder("assets");
 
     let mut explosions: Vec<(Emitter, Vec2)> = vec![];
     let mut game_state = GameState::MainMenu;
     let mut score: u32 = 0;
-    let mut high_score: u32 = fs::read_to_string("highscore.dat")
-        .map_or(Ok(0), |i| i.parse::<u32>())
-        .unwrap_or(0);
     let mut squares: Vec<Shape> = vec![];
     let mut bullets: Vec<Shape> = vec![];
     let mut circle = Shape {
@@ -223,6 +267,21 @@ async fn draw() {
     loop {
         clear_background(BLACK);
 
+        // consume messages
+        loop {
+            match rx.try_recv() {
+                Ok(msg) => match msg {
+                    GameMessage::UpdateResources(game_resources) => storage::store(game_resources),
+                },
+                Err(err) => {
+                    if matches!(err, mpsc::error::TryRecvError::Empty) {
+                        break;
+                    }
+                    panic!("{err}");
+                }
+            }
+        }
+
         material.set_uniform("iResolution", (screen_width(), screen_height()));
         material.set_uniform("direction_modifier", direction_modifier);
         gl_use_material(&material);
@@ -269,6 +328,8 @@ async fn draw() {
             GameState::Playing => {
                 // update
                 let delta_time = get_frame_time();
+                let game_resources = storage::get::<GameResources>();
+                score = game_resources.pods.len() as u32;
                 // if rand::gen_range(0, 99) >= 95 {
                 //     let size = rand::gen_range(16., 64.);
                 //     squares.push(Shape {
@@ -396,17 +457,7 @@ async fn draw() {
                 //         },
                 //     );
                 // }
-                // draw text
-                draw_text(&format!("Score: {score}"), 10., 35., 24., WHITE);
-                let highscore_text = format!("High score: {high_score}");
-                let text_dimensions = measure_text(&highscore_text, None, 24, 1.);
-                draw_text(
-                    &highscore_text,
-                    screen_width() - text_dimensions.width - 10.,
-                    35.,
-                    24.,
-                    WHITE,
-                );
+                draw_text(&format!("Score: {}", score), 10.0, 35.0, 25.0, WHITE);
 
                 // post draw
                 // bullets.retain(|b| b.y > 0. - b.size / 2.);
