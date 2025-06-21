@@ -1,9 +1,12 @@
+use k8s_openapi::api::core::v1::Pod;
+use kube::{Api, Client, Config, api::ListParams};
 use macroquad::prelude::{
     animation::{AnimatedSprite, Animation},
     *,
 };
 use macroquad_particles::{self, AtlasConfig, ColorCurve, Emitter, EmitterConfig};
 use std::fs;
+use tokio::task::JoinHandle;
 
 const MOVEMENT_SPEED: f32 = 200.;
 const FRAGMENT_SHADER: &str = include_str!("starfield-shader.glsl");
@@ -72,8 +75,39 @@ fn particle_explosion() -> EmitterConfig {
     }
 }
 
-#[macroquad::main("CubeHarvest: Cluster Frontier")]
+#[tokio::main]
 async fn main() {
+    // setup kube client
+    let config = Config::infer().await.expect("failed to load kubeconfig");
+    let client = Client::try_from(config).expect("failed to create kube client");
+    let pods: Api<Pod> = Api::default_namespaced(client);
+
+    let list_params = ListParams::default();
+    let pod = pods.list(&list_params).await.expect("failed to load pods");
+    println!("{pod:?}");
+
+    let game_window_handle = open_game_window();
+
+    // TODO: some other game logic need to ran on tokio
+
+    game_window_handle.await.unwrap();
+}
+
+fn open_game_window() -> JoinHandle<()> {
+    tokio::task::spawn_blocking(|| {
+        macroquad::Window::from_config(
+            Conf {
+                sample_count: 4,
+                window_title: "CubeHarvest: Cluster Frontier".to_string(),
+                high_dpi: true,
+                ..Default::default()
+            },
+            draw(),
+        );
+    })
+}
+
+async fn draw() {
     rand::srand(miniquad::date::now() as u64);
     set_pc_assets_folder("assets");
 
