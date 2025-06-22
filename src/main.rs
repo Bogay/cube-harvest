@@ -296,7 +296,7 @@ async fn draw(mut rx: Receiver<GameMessage>, k_tx: Sender<GameMessage>) {
                     circle.x = screen_width() / 2.;
                     circle.y = screen_height() / 2.;
                     game_stage = GameStage::Playing;
-                    start_coroutine(update_credits());
+                    start_update_credits();
                 }
 
                 // draw
@@ -563,7 +563,12 @@ fn create_unit(game_state: &GameState, target: &CreateTarget) -> Pod {
     astro_unit
 }
 
-async fn update_credits() {
+fn start_update_credits() {
+    start_coroutine(earn_credits());
+    start_coroutine(consume_credits());
+}
+
+async fn earn_credits() {
     loop {
         {
             let earned_credits = {
@@ -597,9 +602,25 @@ async fn update_credits() {
 
                 m.into_values().map(|x| x.min(3)).sum::<usize>()
             };
-            storage::get_mut::<GameState>().credits += earned_credits;
+            {
+                let mut game_state = storage::get_mut::<GameState>();
+                game_state.credits = game_state.credits.saturating_add(earned_credits);
+            }
         }
         wait_seconds(1.).await;
+    }
+}
+
+async fn consume_credits() {
+    loop {
+        {
+            let consumed_credits = storage::get::<GameResources>().pods.len();
+            {
+                let mut game_state = storage::get_mut::<GameState>();
+                game_state.credits = game_state.credits.saturating_sub(consumed_credits);
+            }
+        }
+        wait_seconds(3.).await;
     }
 }
 
