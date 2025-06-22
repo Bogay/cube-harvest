@@ -1,15 +1,13 @@
 use core::panic;
 use k8s_openapi::api::core::v1::Node;
 use k8s_openapi::api::core::v1::Pod;
-use kube::ResourceExt;
 use kube::{Api, Client, Config, api::ListParams};
 use macroquad::experimental::collections::storage;
 use macroquad::prelude::{
     animation::{AnimatedSprite, Animation},
     *,
 };
-use macroquad_particles::{self, AtlasConfig, ColorCurve, Emitter, EmitterConfig};
-use std::fs;
+use macroquad_particles::{self, AtlasConfig, Emitter, EmitterConfig};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Receiver;
@@ -75,8 +73,24 @@ impl GameResources {
 }
 
 #[derive(Debug, Clone)]
+enum NavigationMode {
+    Cluster,
+    Node,
+    Create,
+}
+
+#[derive(Debug, Clone)]
+enum CreateTarget {
+    Miner,
+    Processor,
+}
+
+#[derive(Debug, Clone)]
 struct GameState {
     selected_node_index: usize,
+    navigation_mode: NavigationMode,
+    create_target: Option<CreateTarget>,
+    create_text_buf: String,
 }
 
 impl Shape {
@@ -167,6 +181,9 @@ async fn draw(mut rx: Receiver<GameMessage>) {
 
     storage::store(GameState {
         selected_node_index: 0,
+        navigation_mode: NavigationMode::Cluster,
+        create_target: None,
+        create_text_buf: "".to_string(),
     });
 
     let mut explosions: Vec<(Emitter, Vec2)> = vec![];
@@ -321,7 +338,6 @@ async fn draw(mut rx: Receiver<GameMessage>) {
                     explosions.clear();
                     circle.x = screen_width() / 2.;
                     circle.y = screen_height() / 2.;
-                    score = 0;
                     game_stage = GameStage::Playing;
                 }
 
@@ -349,37 +365,68 @@ async fn draw(mut rx: Receiver<GameMessage>) {
                     game_resources.nodes.len()
                 };
 
-                if is_key_down(KeyCode::Escape) {
-                    game_stage = GameStage::Paused;
+                match game_state.navigation_mode {
+                    NavigationMode::Cluster => {
+                        if is_key_pressed(KeyCode::Right) {
+                            game_state.selected_node_index =
+                                game_state.selected_node_index.saturating_add(1);
+                        }
+                        if is_key_pressed(KeyCode::Left) {
+                            game_state.selected_node_index =
+                                game_state.selected_node_index.saturating_sub(1);
+                        }
+                        if is_key_pressed(KeyCode::Enter) {
+                            game_state.navigation_mode = NavigationMode::Node;
+                        }
+                    }
+                    NavigationMode::Node => {
+                        if is_key_pressed(KeyCode::Escape) {
+                            game_state.navigation_mode = NavigationMode::Cluster;
+                        }
+
+                        if is_key_pressed(KeyCode::C) {
+                            game_state.navigation_mode = NavigationMode::Create;
+                            game_state.create_text_buf.clear();
+                        }
+
+                        if is_key_pressed(KeyCode::D) {
+                            // TODO: delete selected unit
+                        }
+                        if is_key_pressed(KeyCode::Right) {
+                            // TODO: update unit selection
+                        }
+                        if is_key_pressed(KeyCode::Left) {
+                            // TODO: update unit selection
+                        }
+                    }
+                    NavigationMode::Create => match &game_state.create_target {
+                        None => {
+                            if is_key_pressed(KeyCode::Escape) {
+                                game_state.navigation_mode = NavigationMode::Node;
+                            }
+
+                            if is_key_pressed(KeyCode::M) {
+                                game_state.create_target = Some(CreateTarget::Miner);
+                            }
+                            if is_key_pressed(KeyCode::P) {
+                                game_state.create_target = Some(CreateTarget::Processor);
+                            }
+                        }
+                        Some(target) => {
+                            if is_key_pressed(KeyCode::Enter) {
+                                println!("Create {target:?} -> {}", game_state.create_text_buf);
+                                game_state.navigation_mode = NavigationMode::Node;
+                            } else if is_key_pressed(KeyCode::Escape) {
+                                game_state.navigation_mode = NavigationMode::Node;
+                            } else if let Some(c) = get_char_pressed() {
+                                if c.is_digit(10) {
+                                    game_state.create_text_buf.push(c);
+                                }
+                            }
+                        }
+                    },
                 }
 
-                // if is_key_down(KeyCode::Space) {
-                //     bullets.push(Shape {
-                //         x: circle.x,
-                //         y: circle.y - 24.,
-                //         speed: circle.speed * 2.,
-                //         size: 32.,
-                //         collided: false,
-                //     });
-                // }
-                // for bullet in &mut bullets {
-                //     bullet.y -= bullet.speed * delta_time;
-                // }
-
-                if is_key_down(KeyCode::Right) {
-                    // circle.x += MOVEMENT_SPEED * delta_time;
-                    // direction_modifier += 0.05 * delta_time;
-                    // ship_sprite.set_animation(2);
-                    game_state.selected_node_index =
-                        game_state.selected_node_index.saturating_add(1);
-                }
-                if is_key_down(KeyCode::Left) {
-                    // circle.x -= MOVEMENT_SPEED * delta_time;
-                    // direction_modifier -= 0.05 * delta_time;
-                    // ship_sprite.set_animation(1);
-                    game_state.selected_node_index =
-                        game_state.selected_node_index.saturating_sub(1);
-                }
                 // if is_key_down(KeyCode::Down) {
                 //     circle.y += MOVEMENT_SPEED * delta_time;
                 // }
@@ -472,27 +519,13 @@ async fn draw(mut rx: Receiver<GameMessage>) {
                 //         },
                 //     );
                 // }
-                let label_size = 25;
-                let label_scale = 1.0;
-                let label_padding = 4.0;
-                let label_dimensions = measure_text("Placeholder", None, label_size, label_scale);
-                draw_text(
-                    &format!("Astro Units: {}", score),
-                    10.0,
-                    35.0,
-                    label_size as f32,
-                    WHITE,
-                );
-                draw_text(
-                    &format!("Credits    : {}", score),
-                    10.0,
-                    35.0 + label_dimensions.height + label_padding,
-                    label_size as f32,
-                    WHITE,
-                );
+                draw_top_panel();
 
                 // draw node
                 draw_node();
+
+                // draw navbar
+                draw_navbar();
 
                 // post draw
                 // bullets.retain(|b| b.y > 0. - b.size / 2.);
@@ -536,6 +569,36 @@ async fn draw(mut rx: Receiver<GameMessage>) {
     }
 }
 
+fn draw_top_panel() {
+    let game_state = storage::get::<GameState>();
+
+    let label_size = 25;
+    let label_scale = 1.0;
+    let label_padding = 4.0;
+    let label_dimensions = measure_text("Placeholder", None, label_size, label_scale);
+    draw_text(
+        &format!("Astro Units: {}", 1), // TODO: fetch pods
+        10.0,
+        35.0,
+        label_size as f32,
+        WHITE,
+    );
+    draw_text(
+        &format!("Credits    : {}", 2), // TODO: fetch credits
+        10.0,
+        35.0 + (label_dimensions.height + label_padding) * 2.,
+        label_size as f32,
+        WHITE,
+    );
+    draw_text(
+        &format!("Astro Node : {}", game_state.selected_node_index),
+        10.0,
+        35.0 + label_dimensions.height + label_padding,
+        label_size as f32,
+        WHITE,
+    );
+}
+
 fn draw_node() {
     let width = screen_width();
     let height = screen_height();
@@ -576,7 +639,7 @@ fn draw_node() {
             BLUE,
         );
     }
-    draw_text(&format!("{}", pods.len()), 0., height - 10., 18., WHITE);
+    // draw_text(&format!("{}", pods.len()), 0., height - 10., 18., WHITE);
 }
 
 fn draw_astro_unit(x: f32, y: f32, size: f32, color: Color) {
@@ -589,5 +652,65 @@ fn draw_astro_unit(x: f32, y: f32, size: f32, color: Color) {
         vec2(x + size / 4.0, y + size / 2.0),
         vec2(x, y + size / 2.0 + size / 4.0),
         GRAY,
+    );
+}
+
+fn draw_navbar() {
+    let width = screen_width();
+    let height = screen_height();
+    let navigation_mode = storage::get::<GameState>().navigation_mode.clone();
+
+    let label_font_size = 18;
+    let label_dim = measure_text("Cluster", None, label_font_size, 1.);
+    let padding = 4.;
+
+    // draw navbar background
+    draw_rectangle(
+        0.,
+        height - padding * 2. - label_dim.height - 5.,
+        width,
+        padding * 2. + label_dim.height + 10.,
+        GRAY,
+    );
+
+    // draw tooltip
+    let mut tooltip = String::with_capacity(0x50);
+    match navigation_mode {
+        NavigationMode::Cluster => {
+            tooltip.push_str("Cluster");
+            tooltip.push_str(" | [Enter] Select node");
+            tooltip.push_str(" | [<- ->] Switch node");
+        }
+        NavigationMode::Node => {
+            tooltip.push_str("Node   ");
+            tooltip.push_str(" | [Esc] Back");
+            tooltip.push_str(" | [<- ->] Switch unit");
+            tooltip.push_str(" | [D]elete unit");
+            tooltip.push_str(" | [C]reate unit");
+        }
+        NavigationMode::Create => {
+            tooltip.push_str("Create ");
+            let game_state = storage::get::<GameState>();
+            match game_state.create_target.as_ref() {
+                Some(target) => {
+                    tooltip.push_str(" | ");
+                    tooltip.push_str(&format!("{target:?}"));
+                    tooltip.push_str(" : ");
+                    tooltip.push_str(&game_state.create_text_buf);
+                }
+                None => {
+                    tooltip.push_str(" | [Esc] Back");
+                    tooltip.push_str(" | [M]iner");
+                    tooltip.push_str(" | [P]rocessor");
+                }
+            }
+        }
+    }
+    draw_text(
+        &tooltip,
+        0. + padding,
+        height - label_dim.height / 2. - padding,
+        18.,
+        WHITE,
     );
 }
