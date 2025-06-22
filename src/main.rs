@@ -5,12 +5,16 @@ use k8s_openapi::api::core::v1::Pod;
 use kube::api::PostParams;
 use kube::{Api, Client, Config, api::ListParams};
 use macroquad::experimental::collections::storage;
+use macroquad::prelude::coroutines::start_coroutine;
+use macroquad::prelude::coroutines::wait_seconds;
 use macroquad::prelude::{
     animation::{AnimatedSprite, Animation},
     *,
 };
 use macroquad_particles::{self, AtlasConfig, Emitter, EmitterConfig};
+use std::collections::HashMap;
 use std::time::Duration;
+use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::mpsc::Sender;
@@ -54,7 +58,8 @@ struct Shape {
 #[template(path = "astro-unit.json", escape = "none")]
 struct AstroUnitTemplate {
     name: String,
-    target_ip: String,
+    target_id: usize,
+    unit_type: String,
 }
 
 struct GameResources {
@@ -101,6 +106,7 @@ struct GameState {
     navigation_mode: NavigationMode,
     create_target: Option<CreateTarget>,
     create_text_buf: String,
+    credits: usize,
 }
 
 impl Shape {
@@ -212,11 +218,11 @@ async fn draw(mut rx: Receiver<GameMessage>, k_tx: Sender<GameMessage>) {
         navigation_mode: NavigationMode::Cluster,
         create_target: None,
         create_text_buf: "".to_string(),
+        credits: 0,
     });
 
     let mut explosions: Vec<(Emitter, Vec2)> = vec![];
     let mut game_stage = GameStage::MainMenu;
-    let mut score: u32 = 0;
     let mut squares: Vec<Shape> = vec![];
     let mut bullets: Vec<Shape> = vec![];
     let mut circle = Shape {
@@ -226,7 +232,6 @@ async fn draw(mut rx: Receiver<GameMessage>, k_tx: Sender<GameMessage>) {
         y: screen_height() / 2.,
         collided: false,
     };
-    let mut direction_modifier: f32 = 0.;
     let render_target = render_target(320, 150);
     render_target.texture.set_filter(FilterMode::Nearest);
     let material = load_material(
@@ -340,7 +345,6 @@ async fn draw(mut rx: Receiver<GameMessage>, k_tx: Sender<GameMessage>) {
         }
 
         material.set_uniform("iResolution", (screen_width(), screen_height()));
-        material.set_uniform("direction_modifier", direction_modifier);
         gl_use_material(&material);
         draw_texture_ex(
             &render_target.texture,
@@ -368,6 +372,7 @@ async fn draw(mut rx: Receiver<GameMessage>, k_tx: Sender<GameMessage>) {
                     circle.x = screen_width() / 2.;
                     circle.y = screen_height() / 2.;
                     game_stage = GameStage::Playing;
+                    start_coroutine(update_credits());
                 }
 
                 // draw
@@ -385,10 +390,6 @@ async fn draw(mut rx: Receiver<GameMessage>, k_tx: Sender<GameMessage>) {
                 // update
                 let delta_time = get_frame_time();
                 let mut game_state = storage::get_mut::<GameState>().clone();
-                score = {
-                    let game_resources = storage::get::<GameResources>();
-                    game_resources.pods.len() as u32
-                };
                 let nodes_len = {
                     let game_resources = storage::get::<GameResources>();
                     game_resources.nodes.len()
@@ -407,15 +408,15 @@ async fn draw(mut rx: Receiver<GameMessage>, k_tx: Sender<GameMessage>) {
                         if is_key_pressed(KeyCode::Enter) {
                             game_state.navigation_mode = NavigationMode::Node;
                         }
+                        if is_key_pressed(KeyCode::C) {
+                            game_state.navigation_mode = NavigationMode::Create;
+                            game_state.create_text_buf.clear();
+                            game_state.create_target = None;
+                        }
                     }
                     NavigationMode::Node => {
                         if is_key_pressed(KeyCode::Escape) {
                             game_state.navigation_mode = NavigationMode::Cluster;
-                        }
-
-                        if is_key_pressed(KeyCode::C) {
-                            game_state.navigation_mode = NavigationMode::Create;
-                            game_state.create_text_buf.clear();
                         }
 
                         if is_key_pressed(KeyCode::D) {
@@ -431,7 +432,7 @@ async fn draw(mut rx: Receiver<GameMessage>, k_tx: Sender<GameMessage>) {
                     NavigationMode::Create => match &game_state.create_target {
                         None => {
                             if is_key_pressed(KeyCode::Escape) {
-                                game_state.navigation_mode = NavigationMode::Node;
+                                game_state.navigation_mode = NavigationMode::Cluster;
                             }
 
                             if is_key_pressed(KeyCode::M) {
@@ -444,9 +445,15 @@ async fn draw(mut rx: Receiver<GameMessage>, k_tx: Sender<GameMessage>) {
                         Some(target) => {
                             if is_key_pressed(KeyCode::Enter) {
                                 let unit_id = rand::rand();
+                                let unit_type = match target {
+                                    CreateTarget::Miner => "miner",
+                                    CreateTarget::Processor => "processor",
+                                }
+                                .to_string();
                                 let astro_unit = AstroUnitTemplate {
-                                    name: format!("miner-{unit_id}"),
-                                    target_ip: (rand::rand() % 255).to_string(),
+                                    name: format!("{unit_type}-{unit_id}"),
+                                    target_id: (rand::rand() % 255) as usize,
+                                    unit_type,
                                 }
                                 .render()
                                 .unwrap();
@@ -456,9 +463,9 @@ async fn draw(mut rx: Receiver<GameMessage>, k_tx: Sender<GameMessage>) {
                                 k_tx.send(GameMessage::CreatePod(astro_unit))
                                     .await
                                     .expect("failed to send pod");
-                                game_state.navigation_mode = NavigationMode::Node;
+                                game_state.navigation_mode = NavigationMode::Cluster;
                             } else if is_key_pressed(KeyCode::Escape) {
-                                game_state.navigation_mode = NavigationMode::Node;
+                                game_state.navigation_mode = NavigationMode::Cluster;
                             } else if let Some(c) = get_char_pressed() {
                                 if c.is_digit(10) {
                                     game_state.create_text_buf.push(c);
@@ -562,17 +569,8 @@ async fn draw(mut rx: Receiver<GameMessage>, k_tx: Sender<GameMessage>) {
                 // }
                 draw_top_panel();
 
-                // draw node
                 draw_node();
-
-                // draw navbar
                 draw_navbar();
-
-                // post draw
-                // bullets.retain(|b| b.y > 0. - b.size / 2.);
-                // squares.retain(|s| !s.collided);
-                // bullets.retain(|b| !b.collided);
-                // explosions.retain(|(e, _)| e.config.emitting);
             }
             GameStage::Paused => {
                 if is_key_pressed(KeyCode::Space) {
@@ -610,22 +608,41 @@ async fn draw(mut rx: Receiver<GameMessage>, k_tx: Sender<GameMessage>) {
     }
 }
 
+async fn update_credits() {
+    let mut m = HashMap::new();
+    loop {
+        {
+            {
+                let game_resources = storage::get::<GameResources>();
+                for p in &game_resources.pods {
+                    if p.metadata.labels.and_then(f)
+                }
+            }
+            storage::get_mut::<GameState>().credits += pods_len;
+        }
+        wait_seconds(1.).await;
+    }
+}
+
+
+
 fn draw_top_panel() {
-    let game_state = storage::get::<GameState>();
+    let game_state = storage::get::<GameState>().clone();
+    let game_resources = storage::get::<GameResources>();
 
     let label_size = 25;
     let label_scale = 1.0;
     let label_padding = 4.0;
     let label_dimensions = measure_text("Placeholder", None, label_size, label_scale);
     draw_text(
-        &format!("Astro Units: {}", 1), // TODO: fetch pods
+        &format!("Astro Units: {}", game_resources.pods.len()),
         10.0,
         35.0,
         label_size as f32,
         WHITE,
     );
     draw_text(
-        &format!("Credits    : {}", 2), // TODO: fetch credits
+        &format!("Credits    : {}", game_state.credits),
         10.0,
         35.0 + (label_dimensions.height + label_padding) * 2.,
         label_size as f32,
@@ -673,25 +690,59 @@ fn draw_node() {
     // draw pods info
     let pod_size = 32.;
     for (i, p) in pods.iter().enumerate() {
-        draw_astro_unit(
-            width / 2. - 200. + pod_size * 1.5 * i as f32,
-            height - node_height / 2. + 15. - pod_size / 2.,
-            pod_size,
-            BLUE,
-        );
+        match get_unit_type(p).as_deref()
+        {
+            Some("miner") => {
+                draw_miner(
+                    width / 2. - 200. + pod_size * 1.5 * i as f32,
+                    height - node_height / 2. + 15. - pod_size / 2.,
+                    pod_size,
+                    BLUE,
+                );
+            }
+            _ => {
+                draw_processor(
+                    width / 2. - 200. + pod_size * 1.5 * i as f32,
+                    height - node_height / 2. + 15. - pod_size / 2. - 48.,
+                    pod_size,
+                    PINK,
+                );
+            }
+        }
     }
     // draw_text(&format!("{}", pods.len()), 0., height - 10., 18., WHITE);
 }
 
-fn draw_astro_unit(x: f32, y: f32, size: f32, color: Color) {
+fn get_unit_type(p: &Pod) -> Option<String> {
+    p
+        .metadata
+        .labels
+        .as_ref()
+        .and_then(|l| l.get("cube-harvest.io/unit-type").cloned())
+}
+
+fn draw_miner(x: f32, y: f32, size: f32, color: Color) {
     // Main body (simple rectangle or custom polygon)
     draw_rectangle(x - size / 2.0, y - size / 2.0, size, size, color);
 
-    // Optional: a small "engine" or "sensor" part
+    // a small "engine" or "sensor" part
     draw_triangle(
         vec2(x - size / 4.0, y + size / 2.0),
         vec2(x + size / 4.0, y + size / 2.0),
         vec2(x, y + size / 2.0 + size / 4.0),
+        GRAY,
+    );
+}
+
+fn draw_processor(x: f32, y: f32, size: f32, color: Color) {
+    // Main body (simple rectangle or custom polygon)
+    draw_rectangle(x - size / 2.0, y - size / 2.0, size, size, color);
+
+    // a small "engine" or "sensor" part
+    draw_triangle(
+        vec2(x - size / 4.0, y - size / 2.0),
+        vec2(x + size / 4.0, y - size / 2.0),
+        vec2(x, y - size / 2.0 - size / 4.0),
         GRAY,
     );
 }
@@ -721,13 +772,13 @@ fn draw_navbar() {
             tooltip.push_str("Cluster");
             tooltip.push_str(" | [Enter] Select node");
             tooltip.push_str(" | [<- ->] Switch node");
+            tooltip.push_str(" | [C]reate unit");
         }
         NavigationMode::Node => {
             tooltip.push_str("Node   ");
             tooltip.push_str(" | [Esc] Back");
             tooltip.push_str(" | [<- ->] Switch unit");
             tooltip.push_str(" | [D]elete unit");
-            tooltip.push_str(" | [C]reate unit");
         }
         NavigationMode::Create => {
             tooltip.push_str("Create ");
