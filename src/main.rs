@@ -2,13 +2,14 @@ use askama::Template;
 use core::panic;
 use k8s_openapi::api::core::v1::Node;
 use k8s_openapi::api::core::v1::Pod;
+use kube::api::DeleteParams;
 use kube::api::PostParams;
 use kube::{Api, Client, Config, api::ListParams};
 use macroquad::experimental::collections::storage;
 use macroquad::prelude::coroutines::start_coroutine;
 use macroquad::prelude::coroutines::wait_seconds;
 use macroquad::prelude::*;
-use macroquad_particles::{self, AtlasConfig, Emitter, EmitterConfig};
+use macroquad_particles::{self, Emitter};
 use std::collections::HashMap;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -149,6 +150,12 @@ async fn main() {
                             .await
                             .expect("failed to create pod");
                     }
+                    GameMessage::DeletePod(name) => {
+                        let api = Api::<Pod>::default_namespaced(client.clone());
+                        api.delete(&name, &DeleteParams::default())
+                            .await
+                            .expect("failed to delete pod");
+                    }
                     GameMessage::UpdateResources(_) => unreachable!(),
                 },
                 Err(err) => {
@@ -173,6 +180,8 @@ async fn main() {
 enum GameMessage {
     UpdateResources(GameResources),
     CreatePod(Pod),
+    /// Delete pod by name
+    DeletePod(String),
 }
 
 fn open_game_window(rx: Receiver<GameMessage>, k_tx: Sender<GameMessage>) -> JoinHandle<()> {
@@ -203,17 +212,7 @@ async fn draw(mut rx: Receiver<GameMessage>, k_tx: Sender<GameMessage>) {
         processor_price: 0,
     });
 
-    let mut explosions: Vec<(Emitter, Vec2)> = vec![];
     let mut game_stage = GameStage::MainMenu;
-    let mut squares: Vec<Shape> = vec![];
-    let mut bullets: Vec<Shape> = vec![];
-    let mut circle = Shape {
-        size: 32.,
-        speed: MOVEMENT_SPEED,
-        x: screen_width() / 2.,
-        y: screen_height() / 2.,
-        collided: false,
-    };
     let render_target = render_target(320, 150);
     render_target.texture.set_filter(FilterMode::Nearest);
     let material = load_material(
@@ -242,7 +241,7 @@ async fn draw(mut rx: Receiver<GameMessage>, k_tx: Sender<GameMessage>) {
             match rx.try_recv() {
                 Ok(msg) => match msg {
                     GameMessage::UpdateResources(game_resources) => storage::store(game_resources),
-                    GameMessage::CreatePod(_) => unreachable!(),
+                    GameMessage::DeletePod(_) | GameMessage::CreatePod(_) => unreachable!(),
                 },
                 Err(err) => {
                     if matches!(err, mpsc::error::TryRecvError::Empty) {
@@ -290,13 +289,9 @@ async fn draw(mut rx: Receiver<GameMessage>, k_tx: Sender<GameMessage>) {
                 }
 
                 if is_key_pressed(KeyCode::Space) {
-                    squares.clear();
-                    bullets.clear();
-                    explosions.clear();
-                    circle.x = screen_width() / 2.;
-                    circle.y = screen_height() / 2.;
                     game_stage = GameStage::Playing;
                     start_update_credits();
+                    start_spawn_monkeys(k_tx.clone());
                 }
 
                 // draw
@@ -382,9 +377,8 @@ async fn draw(mut rx: Receiver<GameMessage>, k_tx: Sender<GameMessage>) {
                                 if has_enough_credit {
                                     let astro_unit = create_unit(&game_state, target);
                                     println!("Create {target:?} -> {}", game_state.create_text_buf);
-                                    k_tx.send(GameMessage::CreatePod(astro_unit))
-                                        .await
-                                        .expect("failed to send pod");
+                                    k_tx.blocking_send(GameMessage::CreatePod(astro_unit))
+                                        .expect("failed to request creating pod");
                                     match target {
                                         CreateTarget::Miner => {
                                             game_state.credits -= game_state.miner_price;
@@ -411,100 +405,12 @@ async fn draw(mut rx: Receiver<GameMessage>, k_tx: Sender<GameMessage>) {
                     },
                 }
 
-                // if is_key_down(KeyCode::Down) {
-                //     circle.y += MOVEMENT_SPEED * delta_time;
-                // }
-                // if is_key_down(KeyCode::Up) {
-                //     circle.y -= MOVEMENT_SPEED * delta_time;
-                // }
-                // circle.x = clamp(circle.x, 0.0, screen_width());
-                // circle.y = clamp(circle.y, 0.0, screen_height());
-
-                // for sq in &mut squares {
-                //     for bullet in &mut bullets {
-                //         if bullet.collides_with(sq) {
-                //             bullet.collided = true;
-                //             sq.collided = true;
-
-                //             score += sq.size.round() as u32;
-                //             high_score = high_score.max(score);
-
-                //             explosions.push((
-                //                 Emitter::new(EmitterConfig {
-                //                     amount: sq.size.round() as u32 * 2,
-                //                     texture: Some(explosion_texture.clone()),
-                //                     ..particle_explosion()
-                //                 }),
-                //                 vec2(sq.x, sq.y),
-                //             ));
-                //         }
-                //     }
-                // }
-
-                // if squares.iter().any(|s| circle.collides_with(s)) {
-                //     if score == high_score {
-                //         fs::write("highscore.dat", high_score.to_string())
-                //             .expect("failed to record high score.");
-                //     }
-                //     game_state = GameState::GameOver;
-                // }
                 game_state.selected_node_index =
                     clamp(game_state.selected_node_index, 0, nodes_len - 1);
-
                 // post update
                 storage::store(game_state);
 
-                // draw enemy
-                // enemy_small_sprite.update();
-                // let enemy_frame = enemy_small_sprite.frame();
-                // for sq in &squares {
-                //     draw_texture_ex(
-                //         &enemy_small_texture,
-                //         sq.x - sq.size / 2.,
-                //         sq.y - sq.size / 2.,
-                //         WHITE,
-                //         DrawTextureParams {
-                //             dest_size: Some(vec2(sq.size, sq.size)),
-                //             source: Some(enemy_frame.source_rect),
-                //             ..Default::default()
-                //         },
-                //     );
-                // }
-                // for (e, coords) in &mut explosions {
-                //     e.draw(*coords);
-                // }
-                // draw spaceship
-                // ship_sprite.update();
-                // let ship_frame = ship_sprite.frame();
-                // draw_texture_ex(
-                //     &ship_texture,
-                //     circle.x - circle.size / 2.,
-                //     circle.y - circle.size / 2.,
-                //     WHITE,
-                //     DrawTextureParams {
-                //         dest_size: Some(vec2(circle.size, circle.size)),
-                //         source: Some(ship_frame.source_rect),
-                //         ..Default::default()
-                //     },
-                // );
-                // draw bullets
-                // bullet_sprite.update();
-                // let bullet_frame = bullet_sprite.frame();
-                // for bullet in &bullets {
-                //     draw_texture_ex(
-                //         &bullet_texture,
-                //         bullet.x - bullet.size / 2.,
-                //         bullet.y - bullet.size / 2.,
-                //         WHITE,
-                //         DrawTextureParams {
-                //             dest_size: Some(vec2(bullet.size, bullet.size)),
-                //             source: Some(bullet_frame.source_rect),
-                //             ..Default::default()
-                //         },
-                //     );
-                // }
                 draw_top_panel();
-
                 draw_node();
                 draw_navbar();
             }
@@ -542,6 +448,30 @@ async fn draw(mut rx: Receiver<GameMessage>, k_tx: Sender<GameMessage>) {
 
         next_frame().await
     }
+}
+
+fn start_spawn_monkeys(k_tx: Sender<GameMessage>) {
+    start_coroutine(async move {
+        loop {
+            if rand::gen_range(0, 100) > 95 {
+                println!("starting deleting pod");
+                let game_resources = storage::get::<GameResources>();
+                if !game_resources.pods.is_empty() {
+                    let i = rand::gen_range(0, game_resources.pods.len());
+                    match game_resources.pods[i].metadata.name.as_ref() {
+                        Some(pod_name) => {
+                            k_tx.blocking_send(GameMessage::DeletePod(pod_name.to_string()))
+                                .expect("failed to request deleting pod");
+                        }
+                        None => {
+                            println!("pod {i} does not have name");
+                        }
+                    };
+                }
+            }
+            wait_seconds(3.).await;
+        }
+    });
 }
 
 fn create_unit(game_state: &GameState, target: &CreateTarget) -> Pod {
