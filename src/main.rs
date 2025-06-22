@@ -9,7 +9,6 @@ use macroquad::experimental::collections::storage;
 use macroquad::prelude::coroutines::start_coroutine;
 use macroquad::prelude::coroutines::wait_seconds;
 use macroquad::prelude::*;
-use macroquad_particles::{self, Emitter};
 use std::collections::HashMap;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -18,23 +17,6 @@ use tokio::sync::mpsc::Sender;
 use tokio::task::JoinHandle;
 
 const MOVEMENT_SPEED: f32 = 200.;
-const FRAGMENT_SHADER: &str = include_str!("starfield-shader.glsl");
-const VERTEX_SHADER: &str = "#version 100
-
-attribute vec3 position;
-attribute vec2 texcoord;
-attribute vec4 color0;
-varying float iTime;
-
-uniform mat4 Model;
-uniform mat4 Projection;
-uniform vec4 _Time;
-
-void main() {
-    gl_Position = Projection * Model * vec4(position, 1);
-    iTime = _Time.x;
-}
-";
 
 enum GameStage {
     MainMenu,
@@ -213,22 +195,6 @@ async fn draw(mut rx: Receiver<GameMessage>, k_tx: Sender<GameMessage>) {
     });
 
     let mut game_stage = GameStage::MainMenu;
-    let render_target = render_target(320, 150);
-    render_target.texture.set_filter(FilterMode::Nearest);
-    let material = load_material(
-        ShaderSource::Glsl {
-            vertex: VERTEX_SHADER,
-            fragment: FRAGMENT_SHADER,
-        },
-        MaterialParams {
-            uniforms: vec![
-                UniformDesc::new("iResolution", UniformType::Float2),
-                UniformDesc::new("direction_modifier", UniformType::Float1),
-            ],
-            ..Default::default()
-        },
-    )
-    .unwrap();
     // call after loading all textures
     build_textures_atlas();
 
@@ -266,20 +232,6 @@ async fn draw(mut rx: Receiver<GameMessage>, k_tx: Sender<GameMessage>) {
                 .count();
             storage::store(game_state);
         }
-
-        material.set_uniform("iResolution", (screen_width(), screen_height()));
-        gl_use_material(&material);
-        draw_texture_ex(
-            &render_target.texture,
-            0.,
-            0.,
-            WHITE,
-            DrawTextureParams {
-                dest_size: Some(vec2(screen_width(), screen_height())),
-                ..Default::default()
-            },
-        );
-        gl_use_default_material();
 
         match game_stage {
             GameStage::MainMenu => {
