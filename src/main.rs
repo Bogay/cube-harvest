@@ -1,6 +1,8 @@
+use askama::Template;
 use core::panic;
 use k8s_openapi::api::core::v1::Node;
 use k8s_openapi::api::core::v1::Pod;
+use kube::api::PostParams;
 use kube::{Api, Client, Config, api::ListParams};
 use macroquad::experimental::collections::storage;
 use macroquad::prelude::{
@@ -11,6 +13,7 @@ use macroquad_particles::{self, AtlasConfig, Emitter, EmitterConfig};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Receiver;
+use tokio::sync::mpsc::Sender;
 use tokio::task::JoinHandle;
 
 const MOVEMENT_SPEED: f32 = 200.;
@@ -45,6 +48,13 @@ struct Shape {
     x: f32,
     y: f32,
     collided: bool,
+}
+
+#[derive(Template, Debug)]
+#[template(path = "astro-unit.json", escape = "none")]
+struct AstroUnitTemplate {
+    name: String,
+    target_ip: String,
 }
 
 struct GameResources {
@@ -136,6 +146,7 @@ async fn main() {
     tx.send(GameMessage::UpdateResources(game_resources))
         .await
         .expect("failed to send game msg");
+    let (k_tx, mut k_rx) = mpsc::channel(0x20);
 
     // TODO: handle exiting game
     let reconciliation_loop = tokio::spawn(async move {
@@ -144,6 +155,22 @@ async fn main() {
             tx.send(GameMessage::UpdateResources(game_resources))
                 .await
                 .expect("failed to send game msg");
+            match k_rx.try_recv() {
+                Ok(msg) => match msg {
+                    GameMessage::CreatePod(pod) => {
+                        let api = Api::default_namespaced(client.clone());
+                        api.create(&PostParams::default(), &pod)
+                            .await
+                            .expect("failed to create pod");
+                    }
+                    GameMessage::UpdateResources(_) => unreachable!(),
+                },
+                Err(err) => {
+                    if !matches!(err, mpsc::error::TryRecvError::Empty) {
+                        panic!("{err}");
+                    }
+                }
+            }
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
     });
@@ -151,7 +178,7 @@ async fn main() {
     // Because macroquad need to be executed on one thread, we open it
     // from tokio main function
     // ref: https://github.com/not-fl3/macroquad/issues/182#issuecomment-1001571263
-    let game_window_handle = open_game_window(rx);
+    let game_window_handle = open_game_window(rx, k_tx);
 
     game_window_handle.await.unwrap();
     reconciliation_loop.await.unwrap();
@@ -159,9 +186,10 @@ async fn main() {
 
 enum GameMessage {
     UpdateResources(GameResources),
+    CreatePod(Pod),
 }
 
-fn open_game_window(rx: Receiver<GameMessage>) -> JoinHandle<()> {
+fn open_game_window(rx: Receiver<GameMessage>, k_tx: Sender<GameMessage>) -> JoinHandle<()> {
     tokio::task::spawn_blocking(|| {
         macroquad::Window::from_config(
             Conf {
@@ -170,12 +198,12 @@ fn open_game_window(rx: Receiver<GameMessage>) -> JoinHandle<()> {
                 high_dpi: true,
                 ..Default::default()
             },
-            draw(rx),
+            draw(rx, k_tx),
         );
     })
 }
 
-async fn draw(mut rx: Receiver<GameMessage>) {
+async fn draw(mut rx: Receiver<GameMessage>, k_tx: Sender<GameMessage>) {
     rand::srand(miniquad::date::now() as u64);
     set_pc_assets_folder("assets");
 
@@ -300,6 +328,7 @@ async fn draw(mut rx: Receiver<GameMessage>) {
             match rx.try_recv() {
                 Ok(msg) => match msg {
                     GameMessage::UpdateResources(game_resources) => storage::store(game_resources),
+                    GameMessage::CreatePod(_) => unreachable!(),
                 },
                 Err(err) => {
                     if matches!(err, mpsc::error::TryRecvError::Empty) {
@@ -414,7 +443,19 @@ async fn draw(mut rx: Receiver<GameMessage>) {
                         }
                         Some(target) => {
                             if is_key_pressed(KeyCode::Enter) {
+                                let unit_id = rand::rand();
+                                let astro_unit = AstroUnitTemplate {
+                                    name: format!("miner-{unit_id}"),
+                                    target_ip: (rand::rand() % 255).to_string(),
+                                }
+                                .render()
+                                .unwrap();
+                                let astro_unit = serde_json::from_str::<Pod>(&astro_unit)
+                                    .expect("failed to parse astro unit json");
                                 println!("Create {target:?} -> {}", game_state.create_text_buf);
+                                k_tx.send(GameMessage::CreatePod(astro_unit))
+                                    .await
+                                    .expect("failed to send pod");
                                 game_state.navigation_mode = NavigationMode::Node;
                             } else if is_key_pressed(KeyCode::Escape) {
                                 game_state.navigation_mode = NavigationMode::Node;

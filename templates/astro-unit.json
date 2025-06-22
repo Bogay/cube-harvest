@@ -1,0 +1,17 @@
+{
+	"apiVersion": "v1",
+	"kind": "Pod",
+	"metadata": {
+		"name": "{{ name }}"
+	},
+	"spec": {
+		"containers": [{
+			"name": "miner",
+			"image": "registry.cube-harvest.invalid/miner:42",
+			"env": [{
+				"name": "TARGET",
+				"value": "10.0.0.{{ target_ip }}"
+			}]
+		}]
+	}
+}
