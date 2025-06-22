@@ -7,14 +7,10 @@ use kube::{Api, Client, Config, api::ListParams};
 use macroquad::experimental::collections::storage;
 use macroquad::prelude::coroutines::start_coroutine;
 use macroquad::prelude::coroutines::wait_seconds;
-use macroquad::prelude::{
-    animation::{AnimatedSprite, Animation},
-    *,
-};
+use macroquad::prelude::*;
 use macroquad_particles::{self, AtlasConfig, Emitter, EmitterConfig};
 use std::collections::HashMap;
 use std::time::Duration;
-use std::time::Instant;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::mpsc::Sender;
@@ -107,6 +103,8 @@ struct GameState {
     create_target: Option<CreateTarget>,
     create_text_buf: String,
     credits: usize,
+    miner_price: usize,
+    processor_price: usize,
 }
 
 impl Shape {
@@ -121,24 +119,6 @@ impl Shape {
             w: self.size,
             h: self.size,
         }
-    }
-}
-
-fn particle_explosion() -> EmitterConfig {
-    EmitterConfig {
-        local_coords: false,
-        one_shot: true,
-        emitting: true,
-        lifetime: 0.6,
-        lifetime_randomness: 0.3,
-        explosiveness: 0.65,
-        initial_direction_spread: 2. + std::f32::consts::PI,
-        initial_velocity: 400.,
-        initial_velocity_randomness: 0.8,
-        size: 16.,
-        size_randomness: 0.3,
-        atlas: Some(AtlasConfig::new(5, 1, 0..)),
-        ..Default::default()
     }
 }
 
@@ -219,6 +199,8 @@ async fn draw(mut rx: Receiver<GameMessage>, k_tx: Sender<GameMessage>) {
         create_target: None,
         create_text_buf: "".to_string(),
         credits: 0,
+        miner_price: 0,
+        processor_price: 0,
     });
 
     let mut explosions: Vec<(Emitter, Vec2)> = vec![];
@@ -248,81 +230,8 @@ async fn draw(mut rx: Receiver<GameMessage>, k_tx: Sender<GameMessage>) {
         },
     )
     .unwrap();
-    let ship_texture = load_texture("ship.png")
-        .await
-        .expect("failed to load ship image");
-    ship_texture.set_filter(FilterMode::Nearest);
-    let bullet_texture = load_texture("laser-bolts.png")
-        .await
-        .expect("failed to load laser image");
-    bullet_texture.set_filter(FilterMode::Nearest);
-    let explosion_texture = load_texture("explosion.png")
-        .await
-        .expect("failed to load explosion image");
-    explosion_texture.set_filter(FilterMode::Nearest);
-    let enemy_small_texture = load_texture("enemy-small.png")
-        .await
-        .expect("failed to load enemy image");
-    enemy_small_texture.set_filter(FilterMode::Nearest);
     // call after loading all textures
     build_textures_atlas();
-
-    let mut bullet_sprite = AnimatedSprite::new(
-        16,
-        16,
-        &[
-            Animation {
-                name: "bullet".to_string(),
-                row: 0,
-                frames: 2,
-                fps: 12,
-            },
-            Animation {
-                name: "bolt".to_string(),
-                row: 1,
-                frames: 2,
-                fps: 12,
-            },
-        ],
-        true,
-    );
-    bullet_sprite.set_animation(1);
-    let mut ship_sprite = AnimatedSprite::new(
-        16,
-        24,
-        &[
-            Animation {
-                name: "idle".to_string(),
-                row: 0,
-                frames: 2,
-                fps: 12,
-            },
-            Animation {
-                name: "left".to_string(),
-                row: 2,
-                frames: 2,
-                fps: 12,
-            },
-            Animation {
-                name: "right".to_string(),
-                row: 4,
-                frames: 2,
-                fps: 12,
-            },
-        ],
-        true,
-    );
-    let mut enemy_small_sprite = AnimatedSprite::new(
-        17,
-        16,
-        &[Animation {
-            name: "enemy_small".to_string(),
-            row: 0,
-            frames: 2,
-            fps: 12,
-        }],
-        true,
-    );
 
     // game loop
     loop {
@@ -342,6 +251,21 @@ async fn draw(mut rx: Receiver<GameMessage>, k_tx: Sender<GameMessage>) {
                     panic!("{err}");
                 }
             }
+        }
+
+        {
+            let mut game_state = storage::get::<GameState>().clone();
+            game_state.miner_price = storage::get::<GameResources>()
+                .pods
+                .iter()
+                .filter(|p| matches!(get_unit_type(p).as_deref(), Some("miner")))
+                .count();
+            game_state.processor_price = storage::get::<GameResources>()
+                .pods
+                .iter()
+                .filter(|p| matches!(get_unit_type(p).as_deref(), Some("processor")))
+                .count();
+            storage::store(game_state);
         }
 
         material.set_uniform("iResolution", (screen_width(), screen_height()));
@@ -446,25 +370,33 @@ async fn draw(mut rx: Receiver<GameMessage>, k_tx: Sender<GameMessage>) {
                             if is_key_pressed(KeyCode::Enter)
                                 || matches!(target, CreateTarget::Processor)
                             {
-                                let unit_id = rand::rand();
-                                let unit_type = match target {
-                                    CreateTarget::Miner => "miner",
-                                    CreateTarget::Processor => "processor",
+                                let has_enough_credit = match target {
+                                    CreateTarget::Miner => {
+                                        game_state.credits >= game_state.miner_price
+                                    }
+                                    CreateTarget::Processor => {
+                                        game_state.credits >= game_state.processor_price
+                                    }
+                                };
+
+                                if has_enough_credit {
+                                    let astro_unit = create_unit(&game_state, target);
+                                    println!("Create {target:?} -> {}", game_state.create_text_buf);
+                                    k_tx.send(GameMessage::CreatePod(astro_unit))
+                                        .await
+                                        .expect("failed to send pod");
+                                    match target {
+                                        CreateTarget::Miner => {
+                                            game_state.credits -= game_state.miner_price;
+                                        }
+                                        CreateTarget::Processor => {
+                                            game_state.credits -= game_state.processor_price;
+                                        }
+                                    }
+                                } else {
+                                    // TODO: alert
                                 }
-                                .to_string();
-                                let astro_unit = AstroUnitTemplate {
-                                    name: format!("{unit_type}-{unit_id}"),
-                                    target_ip: game_state.create_text_buf.clone(),
-                                    unit_type,
-                                }
-                                .render()
-                                .unwrap();
-                                let astro_unit = serde_json::from_str::<Pod>(&astro_unit)
-                                    .expect("failed to parse astro unit json");
-                                println!("Create {target:?} -> {}", game_state.create_text_buf);
-                                k_tx.send(GameMessage::CreatePod(astro_unit))
-                                    .await
-                                    .expect("failed to send pod");
+
                                 game_state.navigation_mode = NavigationMode::Cluster;
                             } else if is_key_pressed(KeyCode::Escape) {
                                 game_state.navigation_mode = NavigationMode::Cluster;
@@ -610,6 +542,25 @@ async fn draw(mut rx: Receiver<GameMessage>, k_tx: Sender<GameMessage>) {
 
         next_frame().await
     }
+}
+
+fn create_unit(game_state: &GameState, target: &CreateTarget) -> Pod {
+    let unit_id = rand::rand();
+    let unit_type = match target {
+        CreateTarget::Miner => "miner",
+        CreateTarget::Processor => "processor",
+    }
+    .to_string();
+    let astro_unit = AstroUnitTemplate {
+        name: format!("{unit_type}-{unit_id}"),
+        target_ip: game_state.create_text_buf.clone(),
+        unit_type,
+    }
+    .render()
+    .unwrap();
+    let astro_unit =
+        serde_json::from_str::<Pod>(&astro_unit).expect("failed to parse astro unit json");
+    astro_unit
 }
 
 async fn update_credits() {
@@ -831,8 +782,8 @@ fn draw_navbar() {
                 }
                 None => {
                     tooltip.push_str(" | [Esc] Back");
-                    tooltip.push_str(" | [M]iner");
-                    tooltip.push_str(" | [P]rocessor");
+                    tooltip.push_str(&format!(" | [M]iner (${})", game_state.miner_price));
+                    tooltip.push_str(&format!(" | [P]rocessor (${})", game_state.processor_price));
                 }
             }
         }
