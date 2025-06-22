@@ -13,7 +13,7 @@
 			"image": "registry.cube-harvest.invalid/miner:42",
 			"env": [{
 				"name": "TARGET",
-				"value": "10.0.0.{{ target_id }}"
+				"value": "{{ target_ip }}"
 			}]
 		}]
 	}

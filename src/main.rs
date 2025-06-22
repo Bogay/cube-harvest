@@ -58,7 +58,7 @@ struct Shape {
 #[template(path = "astro-unit.json", escape = "none")]
 struct AstroUnitTemplate {
     name: String,
-    target_id: usize,
+    target_ip: String,
     unit_type: String,
 }
 
@@ -443,7 +443,9 @@ async fn draw(mut rx: Receiver<GameMessage>, k_tx: Sender<GameMessage>) {
                             }
                         }
                         Some(target) => {
-                            if is_key_pressed(KeyCode::Enter) {
+                            if is_key_pressed(KeyCode::Enter)
+                                || matches!(target, CreateTarget::Processor)
+                            {
                                 let unit_id = rand::rand();
                                 let unit_type = match target {
                                     CreateTarget::Miner => "miner",
@@ -452,7 +454,7 @@ async fn draw(mut rx: Receiver<GameMessage>, k_tx: Sender<GameMessage>) {
                                 .to_string();
                                 let astro_unit = AstroUnitTemplate {
                                     name: format!("{unit_type}-{unit_id}"),
-                                    target_id: (rand::rand() % 255) as usize,
+                                    target_ip: game_state.create_text_buf.clone(),
                                     unit_type,
                                 }
                                 .render()
@@ -466,8 +468,10 @@ async fn draw(mut rx: Receiver<GameMessage>, k_tx: Sender<GameMessage>) {
                                 game_state.navigation_mode = NavigationMode::Cluster;
                             } else if is_key_pressed(KeyCode::Escape) {
                                 game_state.navigation_mode = NavigationMode::Cluster;
+                            } else if is_key_pressed(KeyCode::Backspace) {
+                                game_state.create_text_buf.pop();
                             } else if let Some(c) = get_char_pressed() {
-                                if c.is_digit(10) {
+                                if c.is_digit(10) || c == '.' {
                                     game_state.create_text_buf.push(c);
                                 }
                             }
@@ -609,22 +613,48 @@ async fn draw(mut rx: Receiver<GameMessage>, k_tx: Sender<GameMessage>) {
 }
 
 async fn update_credits() {
-    let mut m = HashMap::new();
     loop {
         {
-            {
+            let earned_credits = {
+                let mut m = HashMap::new();
                 let game_resources = storage::get::<GameResources>();
                 for p in &game_resources.pods {
-                    if p.metadata.labels.and_then(f)
+                    if matches!(get_unit_type(p).as_deref(), Some("processor")) {
+                        let Some(ip) = get_unit_ip(p).to_owned() else {
+                            continue;
+                        };
+                        m.insert(ip, 0);
+                    }
                 }
-            }
-            storage::get_mut::<GameState>().credits += pods_len;
+
+                for p in &game_resources.pods {
+                    if matches!(get_unit_type(p).as_deref(), Some("miner")) {
+                        let Some(target_ip) = p
+                            .spec
+                            .as_ref()
+                            .and_then(|s| s.containers[0].env.as_ref())
+                            .and_then(|e| e.iter().find(|e| e.name == "TARGET"))
+                            .and_then(|e| e.value.clone())
+                        else {
+                            continue;
+                        };
+                        if let Some(c) = m.get_mut(target_ip.as_str()) {
+                            *c += 1;
+                        }
+                    }
+                }
+
+                m.into_values().map(|x| x.min(3)).sum::<usize>()
+            };
+            storage::get_mut::<GameState>().credits += earned_credits;
         }
         wait_seconds(1.).await;
     }
 }
 
-
+fn get_unit_ip(p: &Pod) -> Option<&str> {
+    p.status.as_ref().and_then(|s| s.pod_ip.as_deref())
+}
 
 fn draw_top_panel() {
     let game_state = storage::get::<GameState>().clone();
@@ -689,12 +719,13 @@ fn draw_node() {
 
     // draw pods info
     let pod_size = 32.;
+    let gap = pod_size * 3.;
     for (i, p) in pods.iter().enumerate() {
-        match get_unit_type(p).as_deref()
-        {
+        match get_unit_type(p).as_deref() {
             Some("miner") => {
                 draw_miner(
-                    width / 2. - 200. + pod_size * 1.5 * i as f32,
+                    p,
+                    width / 2. - 200. + gap * i as f32,
                     height - node_height / 2. + 15. - pod_size / 2.,
                     pod_size,
                     BLUE,
@@ -702,7 +733,8 @@ fn draw_node() {
             }
             _ => {
                 draw_processor(
-                    width / 2. - 200. + pod_size * 1.5 * i as f32,
+                    p,
+                    width / 2. - 200. + gap * i as f32,
                     height - node_height / 2. + 15. - pod_size / 2. - 48.,
                     pod_size,
                     PINK,
@@ -714,14 +746,13 @@ fn draw_node() {
 }
 
 fn get_unit_type(p: &Pod) -> Option<String> {
-    p
-        .metadata
+    p.metadata
         .labels
         .as_ref()
         .and_then(|l| l.get("cube-harvest.io/unit-type").cloned())
 }
 
-fn draw_miner(x: f32, y: f32, size: f32, color: Color) {
+fn draw_miner(pod: &Pod, x: f32, y: f32, size: f32, color: Color) {
     // Main body (simple rectangle or custom polygon)
     draw_rectangle(x - size / 2.0, y - size / 2.0, size, size, color);
 
@@ -732,9 +763,13 @@ fn draw_miner(x: f32, y: f32, size: f32, color: Color) {
         vec2(x, y + size / 2.0 + size / 4.0),
         GRAY,
     );
+
+    if let Some(ip) = get_unit_ip(pod) {
+        draw_text(&ip.to_string(), x - size / 2.0, y, 18., WHITE);
+    }
 }
 
-fn draw_processor(x: f32, y: f32, size: f32, color: Color) {
+fn draw_processor(pod: &Pod, x: f32, y: f32, size: f32, color: Color) {
     // Main body (simple rectangle or custom polygon)
     draw_rectangle(x - size / 2.0, y - size / 2.0, size, size, color);
 
@@ -745,6 +780,10 @@ fn draw_processor(x: f32, y: f32, size: f32, color: Color) {
         vec2(x, y - size / 2.0 - size / 4.0),
         GRAY,
     );
+
+    if let Some(ip) = get_unit_ip(pod) {
+        draw_text(&ip.to_string(), x - size / 2.0, y, 18., WHITE);
+    }
 }
 
 fn draw_navbar() {
