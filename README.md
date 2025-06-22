@@ -84,3 +84,7 @@ This game interacts with a real Kubernetes cluster. For a quick and lightweight 
 ## Game Design Document
 
 For a deeper dive into the game's mechanics, lore, and future plans, please see the full [Game Design Document](./docs/GDD.md).
+
+## Acknowledgements
+
+The tutorial at [mq.agical.se](https://mq.agical.se/index.html) was a great help in getting started with game development in macroquad.
